@@ -1,0 +1,552 @@
+---
+title: "A Physics Informed Probabalistic Model for Prediciting Rockfall Energy Ratios"
+author: "Jonathan Schmidt and John Duffy"
+date: "8/17/2020"
+bibliography: rockfall.bib
+link-citations: yes
+linkcolor: blue
+output: 
+  html_document:
+    fig caption: yes
+    theme: spacelab
+    highlight: pygments
+    toc: TRUE
+    toc_depth: 3
+    number_sections: TRUE
+    toc_flot:
+      smooth_scroll: FALSE
+---
+
+```{r setup, include=FALSE}
+rm(list = ls())
+knitr::opts_chunk$set(comment = NA)
+knitr::opts_chunk$set(dev = "png", dev.args = list(type = "cairo-png"))
+packages <- c("ggplot2", "lattice", "rstan", "bayesplot", "loo")
+require(packages_)
+options(mc.cores = parallel::detectCores())
+rstan_options(auto_write = TRUE)
+
+util <- new.env()
+
+```
+
+# Overview
+
+This work provides a predictive model for rockfall impact energy that can be incorporated into routine practice, particularly for emergency repairs or initial design. It's probabilistic nature allows for quantification of uncertainty and ready implementation into a risk framework. The intent is for the models to have good predictive power but only use inputs that are relatively cheap and easy to obtain. This case study provides an in-depth tour of the modeling process, which is largely based off the Bayesian workflow developed @Gelman.
+
+# Background
+
+This section will give a primer on some of the necessary engineering and statistical background for the case study. Readers familiar with the concepts can skip ahead to the exploratory data analysis section.
+
+## Introduction
+
+Rockfall refers to the geologic hazard created by the movement of rocks or groups of rock down slopes. This movement can be a combination of free falling, bouncing, rolling and/or sliding. During their descent the rocks attain large amounts of kinetic energy and can severely damage the areas they impact. This threatens lives and causes costly road closures or building repairs.  
+
+
+Rockfalls occur due to a variety of factors, which are commonly grouped into structural, environmental, and anthropogenic. Structural factors arise from the natural formation of the rock, such as fractures or adverse bedding planes. Environmental factors refer to natural triggers such as rainfall, freeze-thaw cycles, or erosion. Anthropogenic factors are directly caused by humans, such as poor blasting or scaling practices, vibrations from traffic and construction equipment, or poor slope design. Rockfall hazards are prominent in the Alps, the West Coast of North America, and Japan (Turner and Schuster, 1996). 
+
+
+Protection measures control the rockfall once it destabilizes. These involve an engineering solution such as a ditch, barrier, net, or fence to absorb the energy of the rock and/or re-direct it away from vulnerable areas.  Design of common protection measures require an estimate of two basic characteristics of the rockfall – impact energy and trajectory. An in-depth assessment of these typically requires a computer model that solves the contact dynamics as the simulated rocks fall, bounce, roll, and slide down the slope. This in turn requires operator skill/time to run the analysis and collect sufficiently detailed topographic data. Such an analysis is often impractical for emergency repairs or preliminary level design.
+
+
+## Field Testing and Database Overview
+
+The database of rock rolls used for this study contains 841 tests conducted at a variety of test sites across the world in the past 40 years. The database is limited to full scale field tests. In these, a rock is released on a test slope and rolls, bounces, and falls downslope into a barrier or catchment zone. <figure>.The rock weights are determined by either weighing the rocks directly or estimated by assuming a density and measuring volume. Some tests include a before and after weight, and others do not. Rock velocities are typically estimated from frame by frame video analysis and used to calculated kinetic energies at the time of impact. This measurement process induces  Duffy (2019) and Duffy (2012) describe how the data were collected and reduced in greater detail.
+
+
+## Probablistic Modeling and Inference
+
+Readers familiar with the process of probabilistic modeling and inference can skip ahead of the methodology section. 
+
+### Building Blocks
+
+First, let's define a few concepts in probabilistic modeling. Abstractly, an observational process comprises a latent phenomenon, its surrounding environment, and a probe by which an experiment interacts with both. This process results in a variation of possible outcomes within an observational space. This variation can result from aleratoric, or inherent, randomness to the latent phenomenon or epistemic variation due to limitations in how accurately the latent system can be observed. The distinction between the two is philosopical -- mathematically they are treated the same.  Probabilistic models assume this variation is sufficiently regular that it can be represented by a probability distribution over the observational space, referred to as a data generating process. In practice we deal with subset of all data generating process $\mathcal{S} \subset \mathcal{P}$ that define possible mathematical narratives for the data generation, referred to as the model configuration space or observational model. A parameterization maps between the model configuration space and a numeric space $\Theta$  assinging a unique parameter $\theta \in \Theta$ to each model configuration $\mathcal{s} \in \mathcal{S}$. The goal of a probabilistic modeling effort is to infer model configurations that are consistent with the observed data and use the information they encode to interact with the latent phenomenon of interest.It should be noted that there is no unique way to define "consistency" meaning that there is no unique way of constructing inferences.
+
+### Bayesian Inference
+
+Bayesian inference allows for us to quantify what we know about the model configuration space with probability distributions. Once we do this, the observational model becomes a conditional probability distribution over the observational space which can be inverted using Bayes Rule to identify which model configurations are consistent with our domain expertise and observed data.
+
+The three steps to performing Bayesian inference : specifying a , formulating a parametric model for observed data to determine the appropriate likelihood function, and calculating or approximating the resulting posterior distributions for forward inference. In full generality, Bayes Rule is expressed mathematically as
+
+$$\pi_S(\theta | y) = \frac{\pi_S(y | \theta)\pi_S(\theta)}{\int\pi_S(y | \theta)\pi_S(\theta)d\theta }$$
+# Exploratory Data Analysis
+
+
+We begin by loading in the database supplied in the accompanying .csv file and doing some housekeeping.
+
+``` {r, comment = NA}
+data <- read.csv("rockdata - Copy.csv") # change path for final upload
+data$TestGroup <- as.factor(data$TestGroup)
+data$TestGroupNumeric <- as.integer(data$TestGroup)
+data$SlopeMaterial <- as.factor(data$SlopeMaterial)
+data <- data[!is.na(data$SlopeAngle),] # remove missing slope angles - not for final!
+data$RotationalKineticEnergy[is.na(data$RotationalKineticEnergy)] <- 0 # set missing RKE to 0  - not for final!
+data$TotalEnergy <- data$TranslationalKineticEnergy + data$RotationalKineticEnergy
+data$Rock_Material <- ifelse(data$SlopeMaterial=="Rock",1,0)
+data$Colluvium_Material <- ifelse(data$SlopeMaterial=="Colluvium",1,0)
+data$WeatheredRock_Material <- ifelse(data$SlopeMaterial == "Weathered Rock",1,0) #add indicator variables for slope type
+source("rockfall_functions.r")
+```
+
+Next, let's take a look at the summary statistics of the predictors. In particular, we are interested in how many rolls have both components of velocity measured (as opposed to just translational), and which tests they belong to.
+
+``` {r, comment = NA}
+summary(data[,2:9])
+```
+
+``` {r, comment = NA}
+summary(data$TestGroup)
+```
+```{r, comment = NA}
+print(paste(sum(data$RotationalVelocity > 0), "rolls with rotational velocity measurements out of", length(data$RotationalVelocity), "total rolls"))
+print(paste(length(unique(data$TestGroup[data$RotationalVelocity>0])),"tests with rotational velocity measurements out of", length(unique(data$TestGroup)), "total tests"))
+print(unique(data$TestGroup[data$RotationalVelocity>0]))
+```
+This initial exploration gives us several key pieces of information.  
+* The number of rock rolls per test spans several orders of magnitude.
+* Most of the rolls and test groups are missing a rotational velocity measurement.  This rotational component can comprise an appreciable portion of the impact energy. 
+* The dataset is mostly balanced between rock and colluivum rolls (am I going to lump weathered rock/colluvium?).
+
+
+
+Next let's take a look at the distributions of the predictors. First, we'll set up some graphic paramters to standardize our plots a bit.
+
+``` {r, comment = NA}
+par(family = "Calibri", mar=c(3, 3, 3, 1), mgp = c(2, .5, 0), tck = -.01, 
+    las = 1, bty="l", cex.axis=1, cex.lab=1, cex.main=1,
+    xaxs="i", yaxs="i" )
+
+c_dark <- rgb(red = 99, green = 99, blue = 99, max = 255) #this is the 3-class greys color scheme from colorbrewer2.org 
+c_mid <- rgb(red = 189, green = 189, blue = 189, max = 255) # chosen to be colorblind and print safe 
+c_light <- rgb(red = 240,green = 240,blue = 240, max = 255)
+
+
+c_dark_highlight <- rgb(red = 79, green = 79, blue = 79, max = 255)
+c_mid_highlight <- rgb(red = 179, green = 179, blue = 179, max = 255)
+c_light_highlight <- rgb(red = 230, green = 230, blue = 230, max = 255)
+
+c_dark_trans_highlight <- rgb(red = 79, green = 79, blue = 79, alpha = 0.9, max = 255)
+c_mid_trans_highlight <- rgb(red = 179, green = 179, blue = 179, alpha = 0.9, max = 255)
+c_light_trans_highlight <- rgb(red = 230, green = 230, blue = 230, alpha = 0.9, max = 255)
+
+
+c_dark_trans <- rgb(red = 99, green = 99, blue = 99, alpha = 0.9, max = 255) # same colors in 50% transparency 
+c_mid_trans <- rgb(red = 189, green = 189, blue = 189,alpha = 0.9, max = 255)
+c_light_trans <- rgb(red = 240, green = 240, blue = 240,alpha = 0.9, max = 255)
+
+```
+
+``` {r, comment = NA}
+draw_summary_histogram(data$SlopeHeight, "Slope Height (ft)", 30)
+draw_summary_histogram(data$SlopeAngle, "Slope Angle (degrees)", 30)
+draw_summary_histogram(data$Weight, "Rock Weight (lbs)", 30)
+```
+
+The test data contains a range of predictors typical for rock slopes seen in transportation and other infrastructure applications, consistent with its development. The distribution for slope angle is relatively symmetric whereas the distributions for slope height and rock weight are more skewed towards smaller values. This could be because bigger rocks and taller slopes cost more and testing may be focused on more economic solutions. The extreme skew of rock weight in particular is interesting.
+
+```{r, comment = NA}
+print(paste(sum(data$Weight>4000), "rolls heavier than 4000 lbs out of", length(data$Weight), "total rolls")) 
+print(paste(length(unique(data$TestGroup[data$Weight>4000])), "tests with rocks heavier than 4000 lbs out of", length(unique(data$TestGroup)), "total tests"))
+```
+
+We only have a limited number of rolls and tests to constrain behavior of rocks weighing less than 4000 lbs
+
+```{r, comment = NA}
+print(paste(sum(data$Weight>10000), "rolls heavier than 10000 lbs out of", length(data$Weight), "total rolls")) 
+print(paste(length(unique(data$TestGroup[data$Weight>10000])), "tests with rocks heavier than 10000 lbs out of", length(unique(data$TestGroup)), "total tests"))
+print(unique(data$TestGroup[data$Weight>10000]))
+```
+
+And almost none to constrain behavior of rocks weighing over 10000 pounds.
+
+From the raw predictors in the dataset we can also derive two useful quantities - slope length and initial potential energy
+
+```{r, comment = NA}
+data$SlopeLength <- data$SlopeHeight/sin(data$SlopeAngle*pi/180)
+data$PotentialEnergy <- data$SlopeHeight*data$Weight/2000
+data$EnergyRatio <- data$TotalEnergy/data$PotentialEnergy
+draw_summary_histogram(data$PotentialEnergy , "Potential Energy (ft-tons)", 30)
+draw_summary_histogram(data$PotentialEnergy/2.7116 , "Potential Energy (kJ)", 30)
+draw_summary_histogram(data$SlopeLength, "Slope Length (ft)", 30)
+
+
+```
+Oddly enough, it appears that two  tests in the database report an impact energy _greater_ than the initial potential energy
+
+```{r, comment = NA}
+draw_summary_histogram(data$TotalEnergy/data$PotentialEnergy, "KE/PE (all slope types)", 30)
+data[data$TotalEnergy/data$PotentialEnergy>1,]
+```
+
+Unless we are to believe that these rocks have somehow found a way around energy conservation principles this bears investigation 
+
+Next, let's take a look at the pairwise correlations between predictors. Too much correlation between predictors can be an issue in model fitting. Qualitatively this can can be viewed as the model having a hard time parsing the combined effect of predictors into individual components when they tend to change in unison.  
+
+``` {r, comment = NA}
+my_cols <- c(c_light, c_mid, c_dark) 
+upper.panel<-function(x, y){
+  points(x,y, pch=19, cex = 0.75, col=my_cols[data$SlopeMaterial]) #code shamelessly adapted from stdha.com
+  r <- round(cor(x, y), digits=2)
+  txt <- paste0("R = ", r)
+  usr <- par("usr"); on.exit(par(usr))
+  par(usr = c(0, 1, 0, 1))
+  text(0.5, 0.9, txt)
+}
+pairs(data[,2:4], lower.panel = NULL, 
+      upper.panel = upper.panel)
+
+```
+In general there is not a strong correlation between any of the predictors. Slope height and slope angle have a negative relationship, perhaps because  steeper slopes made it difficult to set up rocks higher. Rock weight and height have a positive association, perhaps because higher energy barrier tests motivated bigger and better test setups.
+
+```{r, comment = NA}
+my_cols <- c(c_dark, c_mid, c_light) 
+upper.panel<-function(x, y){
+  points(x,y, pch=19, cex = 0.75, col=my_cols[data$SlopeMaterial]) #code shamelessly adapted from stdha.com
+  r <- round(cor(x, y), digits=2)
+  txt <- paste0("R = ", r)
+  usr <- par("usr"); on.exit(par(usr))
+  par(usr = c(0, 1, 0, 1))
+  text(0.5, 0.9, txt)
+}
+pairs(data[,c(4,15,16)], lower.panel = NULL, 
+      upper.panel = upper.panel)
+
+```
+
+
+Finally, we can take a look at the distribution of outcomes.
+
+```{r, comment = NA}
+#histogram_viz(data$TotalEnergy, "Total Energy (ft-tons)")
+#histogram_viz(data$TotalEnergy/2.7, "Total Energy (kJ)")
+#histogram_viz(data$TotalEnergy[data$TotalEnergy < 200],"Total Energy (ft-tons)" )
+#histogram_viz(data$TotalEnergy[data$TotalEnergy < 100],"Total Energy (ft-tons)" )
+histogram_viz(data$TranslationalVelocity, "Translational Velocity (ft/s)")
+```
+And the trends with the five predictors
+
+``` {r, comment = NA}
+my_cols <- c(c_dark, c_mid, c_light)
+my_borders <- c(c_dark_highlight, c_mid_highlight, c_light_highlight)
+plot(data$Weight, data$EnergyRatio, col = my_borders[data$SlopeMaterial], bg = my_cols[data$SlopeMaterial], pch=21, cex = 0.75, xlab = "Weight (lbs)", ylab = "KE/PE" )
+plot(data$SlopeHeight, data$EnergyRatio, col = my_borders[data$SlopeMaterial], bg = my_cols[data$SlopeMaterial], pch=21, cex = 0.75, xlab = "Slope Height (ft)", ylab = "KE/PE" )
+plot(data$SlopeAngle, data$EnergyRatio, col = my_borders[data$SlopeMaterial], bg = my_cols[data$SlopeMaterial], pch=21, cex = 0.75, xlab = "Slope Angle (degrees)", ylab = "KE/PE" )
+plot(data$SlopeLength, data$EnergyRatio, col = my_borders[data$SlopeMaterial], bg = my_cols[data$SlopeMaterial], pch=21, cex = 0.75, xlab = "Slope Length (ft)", ylab = "KE/PE" )
+
+```
+
+
+
+
+# Modeling Workflow
+
+The principled Bayesian workflow used in this study can be separated into three series of investigations: Pre-Model, Pre-Data; Post-Model, Pre-Data; Post-Model, Post-data
+
+
+
+## Conceptual Analysis
+
+## Define Observational Space
+
+Our observation along with  is a N-dimensional vector of positive real numbers, $y \in \mathcal{Y} $ for the N = 747 tests in the rock roll database. The implied observational space is $\mathcal{Y} = \mathbb{R}^N$ This is expressed in Stan as
+
+```{r, comment = NA}
+writeLines(readLines("stan_programs/iter1.stan", n=3))
+```
+
+## Construct Summary Functions
+
+The complete Bayesian model is defined on the product of the observational and parameter spaces $\mathcal{Y} \times \Theta$. A summary function, and the pushforward probability distribution it induces, maps from this complicated higher dimensional space to a more tractable subspace such as the real line. These summary functions are constructed to identify if the specified Bayesian model is consistent with domain expertise. For our particular application we can use physics and historic performance of mitigation measures in the field to ensure that the model is behaving realistically. We consider the following principles a: 
+
+* The predicted velocity cannot exceed the potential velocity, $v = \sqrt{2gh}$.       
+
+* The predicted velocity should be less than the speed of sound.
+
+* The predicted velocity should be positive
+
+
+
+
+## Model Development
+
+### Observational Model
+
+A rock will bounce, tumble, spin, and slide down a slope seemingly without regard to the tidy equations of physics we use to describe the world. However, no matter how seemingly chaotic the behavior it can be predicted from the theories of dynamics and mechanics of materials, at least well enough for the scale of our measurements. This can be thought of as the underlying true data generating process. However, uncertainty will arise from these deterministic dynamics from our imperfect quantification of system properties including measured slope topography, spatial variation in geologic materials, and constitutive models for the soils, rocks, vegetation, and fluids present. This results in a variation of possible outcomes for a fixed trial probabilistic modeling assumes is sufficiently regular to be modeled with a probability distribution. 
+
+For now, we'll take the total kinetic energy equal to the translational plus rotational and assume that the rotational component is 0 when not measured. Formally, we know from conservation of energy that the kinetic energy impacted $KE$ will be the initial potential energy $PE$ minus losses from work done by non-conservative forces such as drag, friction, or plastic strain; energy transferred in collisions; and energy in lost mass. To put symbols to it: $$KE = PE - \Delta$$ 
+ Unfortunately we don't have the means to model these losses exactly. Instead, we'll assume that the total energy lost is related (imperfectly) to travel length of the rock $L$ and the rock weight $W$.  The slope length is approximated as $L = \frac{H}{\sin(\alpha)}$  where $H$ is the height to initiation of rockfall and $\alpha$ is the average slope angle, both recorded in the rockfall database. This will hopefully capture behavior related to the number of collisions and how energy is transferred and damage is accumulated in each. 
+
+Formally, for $i \in (1,...,N)$ with N data points $$\Delta_i = f(L_i,T_i;\boldsymbol{\theta}) + \epsilon_i$$ 
+where $f(.)$ is some function of $L$ defined by parameters $\boldsymbol{\theta}$ and $\epsilon_i$ is a residual term that represents the difference between our imperfect loss model  and the actual losses. Our first model will that assume $\epsilon_i \sim N(0,\sigma_e)$, so that $$KE_i \sim N(f(L_i,\eta_i;\boldsymbol{\theta}), \sigma_e)$$.  This model expresses that the variation of possible outcomes can be modeled by a normal probability density family indexed by a location parameter dependent on the some function of predictor variables and a common scale parameter.
+
+Our first model will assume a linear relationship between predictors, giving  $$KE_i \sim N(PE_i-(\theta_1+\theta_2*L_i+\theta_3*T_i), \sigma_e)$$
+
+
+### Construct Summary Functions
+
+### Simulate Bayesian Ensemble
+
+### Prior Checks
+
+### Configure Algorithm
+
+### Fit Simulated Ensemble
+
+### Algorithmic Calibration
+
+### Inferential Calibration
+
+## Post-Model, Post-Data
+
+### Fitting Observation
+
+### Posterior Fit Diagnostics
+
+### Posterior Retrodictive Checks
+
+### Celebrate
+
+
+# Principled Modeling Workflow
+
+A statistical (or probabilistic model) is essentially a simplification of the complex dynamics that create observable phenomena. There are primary components of any such mode -- the "true" data generating process, the observation process, and the observational model. We will describe how each of these are formulated for our rockfall problem in the sections that follow.
+
+## Observational Process
+
+The observational process is a conceptual abstraction that manipulates and records outcomes sensitive to the phenomena of interest (Betancourt 2020). 
+
+## Data Generating Process
+
+
+# Initial Model Fits
+
+Fitting the models uses the following R packages: `lm`, `Caret`, and `kernlab`. To ensure replicability we call:
+
+``` {r, comment = NA}
+set.seed(420) #replicability
+
+controlObject <- trainControl(method = "repeatedcv",
+                              repeats = 5,
+                              number = 10) #use same folds to test each model
+```
+
+
+## Baseline Linear Regression
+
+``` {R, comment = NA}
+NaiveLMModel <- train(TotalEnergy ~ SlopeHeight + SlopeAngle + Weight + Colluvium_Material + WeatheredRock_Material, data = data,
+                      trControl = controlObject,
+                      method = "lm")
+NaiveLMModel
+```
+
+The performance of the linear model is generally not bad. We would expect the predicted means to be off from the true means by about 22 ft-lbs (~45 kJ) on average. Let's take a look at a few model diagnostics
+
+```{r, comment = NA}
+par(mar=c(3,3,3,1), mgp=c(2,.5,0), tck=-.01)
+plot( y = NaiveLMModel$finalModel$residuals, x = NaiveLMModel$finalModel$fitted.values, xlab = "Predicted Value",
+      ylab = "Residual", bty = 'l',
+      xaxs = "i", xlim = c(0,300),
+      yaxs = "i", ylim = c(-200,200),
+      col = c_dark,
+      pch = 19,
+      cex = 0.75
+      )
+abline(h = 0, lty = "dashed")
+
+```
+
+The residual trends indicate that constant variance of the errors assumption is violated. This will be problematic if we want to use the 
+full predicitve distribution for prediction, but less so if we only want to use mean values.
+
+```{r, comment = NA}
+par(mar=c(3,3,3,1), mgp=c(2,.5,0), tck=-.01)
+plot(x = NaiveLMModel$finalModel$fitted.values, y = data$TotalEnergy,
+     xlab = "Predicted",
+     ylab = "Observed",
+     xaxs = "i", xlim = c(0,500),
+     yaxs = "i", ylim = c(0,500),
+     bty = 'l',
+     pch = 19,
+     cex = 0.75,
+     col = c_dark)
+abline(0,1, lty = "dashed")
+abline(0,2, lty = "dashed")
+abline(0,.5, lty = "dashed")
+text(x = 300,y = 150, pos = 4, labels = "Predicted = 0.5*Observed")
+text(x = 300,y = 300 ,pos = 4, labels = "Predicted = Observed")
+text(x = 200, y = 400 ,pos = 4, labels = "Predicted = 2*Observed")
+```
+
+The plot of predicted versus observed values indicates a relatively large magnitude of error. There are a few too many points falling outside of the +/- a factor of two for my liking.
+
+## Some Transformations
+
+Let's apply some domain expertise and see if any predictor transformations are in order. We know that, in general, the impact energy can be expressed as Potential Energy - Losses. These losses from contact between the slope and rock as it moves downhill. Thus, it would be reasonable to assume that the total energy loss is proportional to the number of contacts, which are proportional to the total distance traveled. So, let's create a new variable `SlopeDist` and a potential energy variable `PE`
+
+```{r comments = NA}
+data$SlopeDist <- data$SlopeHeight*sin(pi*data$SlopeAngle/180)
+data$PE <- data$SlopeHeight*data$Weight*32.2 
+```
+
+
+``` {R, comment = NA}
+NextLMModel <- train(TotalEnergy ~ SlopeDist + PE + WeatheredRock_Material + Colluvium_Material, data = data,
+                      trControl = controlObject,
+                      method = "lm")
+NextLMModel
+
+```
+
+The RMSE is looking quite a bit better. Let's check the other diagnostic plots.
+
+```{r, comment = NA}
+par(mar=c(3,3,3,1), mgp=c(2,.5,0), tck=-.01)
+plot( y = NextLMModel$finalModel$residuals, x = NextLMModel$finalModel$fitted.values, xlab = "Predicted Value",
+      ylab = "Residual", bty = 'l',
+      xaxs = "i", xlim = c(0,300),
+      yaxs = "i", ylim = c(-200,200),
+      col = c_dark,
+      pch = 19,
+      cex = 0.75
+      )
+abline(h = 0, lty = "dashed")
+
+```
+```{r, comment = NA}
+par(mar=c(3,3,3,1), mgp=c(2,.5,0), tck=-.01)
+plot(x = NextLMModel$finalModel$fitted.values, y = data$TotalEnergy,
+     xlab = "Predicted",
+     ylab = "Observed",
+     xaxs = "i", xlim = c(0,500),
+     yaxs = "i", ylim = c(0,500),
+     bty = 'l',
+     pch = 19,
+     cex = 0.75,
+     col = c_dark)
+abline(0,1, lty = "dashed")
+abline(0,2, lty = "dashed")
+abline(0,.5, lty = "dashed")
+text(x = 300,y = 150, pos = 4, labels = "Predicted = 0.5*Observed")
+text(x = 300,y = 300 ,pos = 4, labels = "Predicted = Observed")
+text(x = 200, y = 400 ,pos = 4, labels = "Predicted = 2*Observed")
+```
+
+Finally, let's see if a log transform of total energy helps. 
+
+``` {R, comment = NA}
+data$logTE <- log(data$TotalEnergy)
+LogLMModel <- train(logTE ~ SlopeDist + PE + WeatheredRock_Material + Colluvium_Material, data = data,
+                      trControl = controlObject,
+                      method = "lm")
+LogLMModel
+```
+```{r, comment = NA}
+par(mar=c(3,3,3,1), mgp=c(2,.5,0), tck=-.01)
+plot( y = LogLMModel$finalModel$residuals, x = LogLMModel$finalModel$fitted.values, xlab = "Predicted Value",
+      ylab = "Residual", bty = 'l',
+      xaxs = "i", xlim = c(0,10),
+      yaxs = "i", ylim = c(-4,4),
+      col = c_dark,
+      pch = 19,
+      cex = 0.75
+      )
+abline(h = 0, lty = "dashed")
+```
+
+
+## Performance Ceilings? - K-Nearest Neighbors and Suport Vector Machines
+
+Now that we've developed a satisfactory predictive model let's see how it compares to some machine learning techniques.
+
+``` {r comment = NA}
+knnModel <- train(TotalEnergy ~ SlopeDist + PE + WeatheredRock_Material + Colluvium_Material + Rock_Material, data = data,
+                  trControl = controlObject,
+                  method = "knn",
+                  tuneGrid = data.frame(.k = 1:20),
+                  preProc = c("center", "scale"))
+knnModel
+```
+
+```{r comments = NA}
+svmRModel <- train(TotalEnergy ~ SlopeDist + PE + WeatheredRock_Material + Colluvium_Material + Rock_Material + SlopeDist*WeatheredRock_Material + SlopeDist*Colluvium_Material + SlopeDist*Rock_Material, data = data, 
+                   trControl = controlObject, #support vector machine with analytical sigma parameter, radial basis function
+                   method = "svmRadial",
+                   tuneLength = 15,
+                   preProc = c("center", "scale"))
+svmRModel
+```
+
+The machine learning candidate models outperform the nonlinear regression, as expected. However, the magnitude of the difference in RMSE is not substantial. It's also important to recognize that although cross validation helps guard against overfitting it is not a guarantee. Specifically, if the dataset is limited in breadth the model can still be overfit, just at a higher level. We can see this by comparing the predictions of the machine learning models and the nonlinear regression.
+
+
+``` {r, comment = NA}
+npts <- 500
+xgrid <- seq(min(data$PE),max(data$PE), length.out = npts)
+ygrid <- seq(min(data$SlopeDist),max(data$SlopeDist), length.out = npts)
+pts <- expand.grid(xgrid,ygrid)
+pts$Colluvium_Material <- 0
+pts$Rock_Material <- 1
+pts$WeatheredRock_Material <- mean(data$WeatheredRock_Material)
+names(pts)[1:2] <- c("PE", "SlopeDist")
+pts$z <- predict(NextLMModel, pts)
+levelplot(z ~ PE + SlopeDist, data = pts)
+```
+
+``` {r, comment = NA}
+npts <- 500
+xgrid <- seq(min(data$PE),max(data$PE), length.out = npts)
+ygrid <- seq(min(data$SlopeDist),max(data$SlopeDist), length.out = npts)
+pts <- expand.grid(xgrid,ygrid)
+pts$Colluvium_Material <- 0 
+pts$Rock_Material <- 1
+pts$WeatheredRock_Material <- 0
+names(pts)[1:2] <- c("PE", "SlopeDist")
+pts$z <- predict(svmRModel, pts)
+levelplot(z ~ PE + SlopeDist, data = pts)
+```
+``` {r, comment = NA}
+npts <- 500
+xgrid <- seq(min(data$PE),max(data$PE), length.out = npts)
+ygrid <- seq(min(data$SlopeDist),max(data$SlopeDist), length.out = npts)
+pts <- expand.grid(xgrid,ygrid)
+pts$Colluvium_Material <- 0 
+pts$Rock_Material <- 1
+pts$WeatheredRock_Material <- 0
+names(pts)[1:2] <- c("PE", "SlopeDist")
+pts$z <- predict(knnModel, pts)
+levelplot(z ~ PE + SlopeDist, data = pts)
+```
+The machine learning models have identified complex structures in the data that are unlikely to generalize well. If we look back at the 
+
+## Bayesian Hierachical Models and Missing Data Imputation
+
+
+# Acknowledgements {-}
+
+I think the quote by Hal Stern, "What’s important in a statistical method is not what it does with the data but what data it uses." This study would not be possible without the work of John Duffy and many others to perform the rock rolling tests. 
+
+# References {-}
+
+<div id="refs"></div>
+
+# License {-}
+
+A repository containing the material used in this case study is available on
+[GitHub](https://https://github.com/jschmi08).
+
+The code in this case study is copyrighted by Jonathan Schmidt and licensed
+under the new BSD (3-clause) license:
+
+https://opensource.org/licenses/BSD-3-Clause
+
+The text and figures in this case study are copyrighted by Jonathan Schmidt and John Duffy
+and licensed under the CC BY-NC 4.0 license:
+
+https://creativecommons.org/licenses/by-nc/4.0/
+
+#Original Computing Environment {-}
+
+```{r, comment=NA}
+sessionInfo()
+```
